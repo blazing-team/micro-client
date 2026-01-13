@@ -3,6 +3,7 @@ name: Build and Auto-Release
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:  # 支持手动触发
 
 permissions:
   contents: write
@@ -25,7 +26,7 @@ jobs:
           echo "TZ=Asia/Shanghai" >> $GITHUB_ENV
           
           # 规范时间格式（年-月-日_时-分-秒），确保是北京时间
-          VERSION="v$(date +%Y-%m-%d_%H-%M-%S)"
+          VERSION="v$(date +%Y-%m-%d_%H-%M)"
           # 可选其他规范格式（选其一）：
           # UTC时间带Z标识：VERSION="v$(date -u +%Y-%m-%dT%H-%M-%SZ)"
           # 语义化点分隔：VERSION="v$(date +%Y.%m.%d-%H.%M.%S)"
@@ -95,7 +96,7 @@ jobs:
       - name: Remove node prefixes in node_modules
         run: |
           set -e
-          if [ -f "remove-node-prefix.js" ]; then
+          if [ -f "./cmd/remove-node-prefix.js" ]; then
             echo "开始处理node_modules中的node:前缀..."
             node --max-old-space-size=2048 ./cmd/remove-node-prefix.js ./node_modules
           else
