@@ -1,0 +1,1 @@
+var r=SyntaxError,a=TypeError,e=Error,s=EvalError,o=RangeError,v=ReferenceError,E=URIError;export{s as _,v as a,e,o as r,r as s,a as t,E as u};
