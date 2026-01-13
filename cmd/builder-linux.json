@@ -1,0 +1,36 @@
+{
+  "productName": "sun",
+  "appId": "cc.sun.www",
+  "copyright": "© 2025 sun Technology Co., Ltd.",
+  "directories": {
+    "output": "out"
+  },
+  "asar": true,
+  "files": [
+    "node_modules/**/*",
+ "public/electron/**/*",
+ "public/dist/**/*",
+  "public/html/**/*",
+    "public/images/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "build/extraResources/plugins/linux",
+      "to": "extraResources/plugins/linux"
+    }
+  ],
+  "publish": [
+    {
+      "provider": "generic",
+      "url": ""
+    }
+  ],
+  "linux": {
+    "icon": "build/icons/icon.icns",
+    "artifactName": "${productName}-${os}-${version}-${arch}.${ext}",
+    "target": [
+      "deb"
+    ],
+    "category": "Utility"
+  }
+}

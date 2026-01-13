@@ -1,0 +1,213 @@
+name: Build and Auto-Release
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # 支持手动触发
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  OUTPUT_DIR: ./out
+
+jobs:
+  generate-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Generate version number (Force Beijing Time)
+        id: version
+        run: |
+          # 核心修复：先export让当前shell立即生效时区，再写入环境变量
+          export TZ=Asia/Shanghai
+          echo "TZ=Asia/Shanghai" >> $GITHUB_ENV
+          
+          # 规范时间格式（年-月-日_时-分-秒），确保是北京时间
+          VERSION="v$(date +%Y-%m-%d_%H-%M)"
+          # 可选其他规范格式（选其一）：
+          # UTC时间带Z标识：VERSION="v$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+          # 语义化点分隔：VERSION="v$(date +%Y.%m.%d-%H.%M.%S)"
+          
+          echo "生成的北京时间版本号: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        shell: bash
+
+  create-release:
+    needs: generate-version
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ needs.generate-version.outputs.version }}
+    steps:
+      - name: Create Empty Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.generate-version.outputs.version }}
+          name: Auto Release ${{ needs.generate-version.outputs.version }}
+          draft: false
+          prerelease: false
+          files: ""
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: [generate-version, create-release]
+    name: Build for ${{ matrix.os-name }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            os-name: mac
+            arch: x64
+            build-command: build-m
+            electron-arch: "--x64"
+            extensions: "dmg,app.zip"
+          - os: windows-latest
+            os-name: win
+            arch: x64
+            build-command: build-w
+            electron-arch: "--x64"
+            extensions: "exe,msi,zip"
+
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install Dependencies
+        run: |
+          set -e
+          NODE_OPTIONS=--max-old-space-size=4096 npm install --legacy-peer-deps
+          npm install ./ee-core
+          npm install bytenode@1.2.2
+        shell: bash
+
+      - name: Remove node prefixes in node_modules
+        run: |
+          set -e
+          if [ -f "./cmd/remove-node-prefix.js" ]; then
+            echo "开始处理node_modules中的node:前缀..."
+            node --max-old-space-size=2048 ./cmd/remove-node-prefix.js ./node_modules
+          else
+            echo "错误：remove-node-prefix.js脚本不存在！"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Build Electron App
+        run: |
+          set -e
+          NODE_OPTIONS=--max-old-space-size=4096 npm run ${{ matrix.build-command }} ${{ matrix.electron-arch }}
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        shell: bash
+
+      - name: 详细检查输出目录结构
+        run: |
+          set -e
+          echo "当前工作目录: $(pwd)"
+          echo "列出所有目录结构:"
+          ls -R
+          echo "检查输出目录存在性: $OUTPUT_DIR"
+          if [ -d "$OUTPUT_DIR" ]; then
+            echo "输出目录内容:"
+            ls -la "$OUTPUT_DIR"
+            echo "输出目录下所有文件（含路径）:"
+            find "$OUTPUT_DIR" -type f -print
+          else
+            echo "错误: 输出目录 $OUTPUT_DIR 不存在!"
+            exit 1
+          fi
+        shell: bash
+
+      - name: 整理构建产物（统一路径，方便上传）
+        id: collect-assets
+        run: |
+          set -e
+          VERSION="${{ needs.generate-version.outputs.version }}"
+          BASE_NAME="${VERSION}-${{ matrix.os-name }}-${{ matrix.arch }}"
+          mkdir -p ./release-assets
+          rm -rf ./release-assets/*
+          
+          ASSET_PATHS=()
+          IFS=',' read -ra EXTS <<< "${{ matrix.extensions }}"
+          for ext in "${EXTS[@]}"; do
+            echo "查找 $OUTPUT_DIR 下后缀为.$ext的文件..."
+            files=$(find "$OUTPUT_DIR" -type f -name "*.$ext" | sort | head -n 1)
+            if [ -n "$files" ]; then
+              filename="${BASE_NAME}-$(basename "$files")"
+              files=$(echo "$files" | sed 's/\\/\//g')
+              cp "$files" ./release-assets/"$filename"
+              echo "已整理产物: ./release-assets/$filename"
+              ABS_FILE_PATH="$(pwd)/release-assets/$filename"
+              ASSET_PATHS+=("$ABS_FILE_PATH")
+              echo "产物绝对路径: $ABS_FILE_PATH"
+            else
+              echo "警告: 未找到 $OUTPUT_DIR 下后缀为.$ext的文件"
+            fi
+          done
+          
+          if [ ${#ASSET_PATHS[@]} -eq 0 ]; then
+            echo "错误: 无产物可上传！"
+            exit 1
+          fi
+          
+          echo "assets_dir=$(pwd)/release-assets" >> $GITHUB_OUTPUT
+          echo "最终整理的产物列表（绝对路径）:"
+          ls -la "$(pwd)/release-assets"
+          for file in "${ASSET_PATHS[@]}"; do
+            echo "确认产物存在: $file -> $(test -f "$file" && "是" || "否")"
+          done
+        shell: bash
+
+      # 仅上传产物到Artifact（不再直接上传到Release）
+      - name: Upload Release Assets as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.os-name }}-${{ matrix.arch }}
+          path: ./release-assets/*
+          if-no-files-found: error
+
+  # 新增：统一上传所有平台的Artifact到Release（解决并发冲突）
+  upload-all-assets-to-release:
+    needs: [generate-version, create-release, build]  # 等所有build完成
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./all-assets  # 下载所有Artifact到all-assets目录
+          pattern: release-assets-*  # 匹配所有平台的Artifact名称
+          merge-multiple: true  # 合并所有Artifact到同一目录
+
+      - name: 检查下载的产物
+        run: |
+          echo "所有下载的产物列表:"
+          ls -la ./all-assets
+          # 校验是否有产物
+          if [ -z "$(ls -A ./all-assets 2>/dev/null)" ]; then
+            echo "错误: 未下载到任何产物！"
+            exit 1
+          fi
+
+      # 统一上传所有产物到Release（串行执行，无并发冲突）
+      - name: Upload All Assets to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.generate-version.outputs.version }}
+          files: ./all-assets/*  # 上传所有平台的产物
+          fail_on_unmatched_files: false
+          append_body: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
