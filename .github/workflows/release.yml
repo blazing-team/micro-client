@@ -97,7 +97,7 @@ jobs:
           set -e
           if [ -f "remove-node-prefix.js" ]; then
             echo "开始处理node_modules中的node:前缀..."
-            node --max-old-space-size=2048 remove-node-prefix.js ./node_modules
+            node --max-old-space-size=2048 ./remove-node-prefix.js ./node_modules
           else
             echo "错误：remove-node-prefix.js脚本不存在！"
             exit 1
