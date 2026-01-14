@@ -3,7 +3,7 @@ name: Build and Auto-Release
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # 支持手动触发
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,7 +11,7 @@ permissions:
 
 env:
   OUTPUT_DIR: ./out
-  APK_DIR: ./public/apk  # 新增：定义APK目录路径
+  APK_DIR: ./public/apk
 
 jobs:
   generate-version:
@@ -19,37 +19,19 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Generate version number (Force Beijing Time)
+      - name: Generate version number (Beijing Time, dot-separated H-M)
         id: version
         run: |
           export TZ=Asia/Shanghai
           echo "TZ=Asia/Shanghai" >> $GITHUB_ENV
-          # 修改：时分用:连接，格式为 年-月-日_时:分，去除秒数
-          VERSION="v$(date +%Y-%m-%d_%H:%M)"
-          echo "生成的北京时间版本号: $VERSION"
+          # 关键修改：时分用点连接，格式为 v年-月-日_时.分（无秒）
+          VERSION="v$(date +%Y-%m-%d_%H.%M)"
+          echo "生成的版本号: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
         shell: bash
 
-  create-release:
-    needs: generate-version
-    runs-on: ubuntu-latest
-    outputs:
-      release_tag: ${{ needs.generate-version.outputs.version }}
-    steps:
-      - name: Create Empty Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.generate-version.outputs.version }}
-          name: Auto Release ${{ needs.generate-version.outputs.version }}
-          draft: false
-          prerelease: false
-          files: ""
-          fail_on_unmatched_files: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build:
-    needs: [generate-version, create-release]
+    needs: generate-version
     name: Build for ${{ matrix.os-name }} (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -68,11 +50,10 @@ jobs:
             build-command: build-w
             electron-arch: "--x64"
             extensions: "exe,msi,zip"
-          # 新增：apk构建项（如果不需要单独构建，可注释，仅保留收集逻辑）
           - os: ubuntu-latest
             os-name: android
             arch: arm64-v8a
-            build-command: echo "Skip build, only collect APK"
+            build-command: echo "Skip build, collect APK"
             electron-arch: ""
             extensions: "apk"
 
@@ -99,7 +80,6 @@ jobs:
         run: |
           set -e
           if [ -f "./cmd/remove-node-prefix.js" ]; then
-            echo "开始处理node_modules中的node:前缀..."
             node --max-old-space-size=2048 ./cmd/remove-node-prefix.js ./node_modules
           else
             echo "错误：remove-node-prefix.js脚本不存在！"
@@ -115,33 +95,16 @@ jobs:
           TARGET_ARCH: ${{ matrix.arch }}
         shell: bash
 
-      - name: 详细检查输出目录结构
+      - name: Check directory structure
         run: |
           set -e
-          echo "当前工作目录: $(pwd)"
-          echo "列出所有目录结构:"
+          echo "Current dir: $(pwd)"
           ls -R
-          echo "检查输出目录存在性: $OUTPUT_DIR"
-          if [ -d "$OUTPUT_DIR" ]; then
-            echo "输出目录内容:"
-            ls -la "$OUTPUT_DIR"
-            echo "输出目录下所有文件（含路径）:"
-            find "$OUTPUT_DIR" -type f -print
-          else
-            echo "输出目录 $OUTPUT_DIR 不存在，跳过检查"
-          fi
-          # 新增：检查APK目录存在性
-          echo "检查APK目录存在性: $APK_DIR"
-          if [ -d "$APK_DIR" ]; then
-            echo "APK目录内容:"
-            ls -la "$APK_DIR"
-            find "$APK_DIR" -type f -name "*.apk" -print
-          else
-            echo "警告: APK目录 $APK_DIR 不存在!"
-          fi
+          [ -d "$OUTPUT_DIR" ] && ls -la "$OUTPUT_DIR" && find "$OUTPUT_DIR" -type f -print
+          [ -d "$APK_DIR" ] && ls -la "$APK_DIR" && find "$APK_DIR" -type f -name "*.apk" -print
         shell: bash
 
-      - name: 整理构建产物（统一路径，方便上传）
+      - name: Collect assets
         id: collect-assets
         run: |
           set -e
@@ -153,42 +116,27 @@ jobs:
           ASSET_PATHS=()
           IFS=',' read -ra EXTS <<< "${{ matrix.extensions }}"
           for ext in "${EXTS[@]}"; do
-            echo "查找文件后缀为.$ext的文件..."
             if [ "$ext" = "apk" ]; then
-              # 特殊处理APK：从public/apk目录查找
-              files=$(find "$APK_DIR" -type f -name "*.$ext" | sort | head -n 1)
+              files=$(find "$APK_DIR" -type f -name "*.apk" | sort | head -n 1)
             else
-              # 其他产物：从OUTPUT_DIR查找
               files=$(find "$OUTPUT_DIR" -type f -name "*.$ext" | sort | head -n 1)
             fi
-
             if [ -n "$files" ]; then
               filename="${BASE_NAME}-$(basename "$files")"
-              files=$(echo "$files" | sed 's/\\/\//g')
               cp "$files" ./release-assets/"$filename"
-              echo "已整理产物: ./release-assets/$filename"
               ABS_FILE_PATH="$(pwd)/release-assets/$filename"
               ASSET_PATHS+=("$ABS_FILE_PATH")
-              echo "产物绝对路径: $ABS_FILE_PATH"
             else
-              echo "警告: 未找到.$ext后缀的文件"
+              echo "警告: 未找到.$ext文件"
             fi
           done
           
-          if [ ${#ASSET_PATHS[@]} -eq 0 ]; then
-            echo "错误: 无产物可上传！"
-            exit 1
-          fi
-          
+          [ ${#ASSET_PATHS[@]} -eq 0 ] && echo "错误: 无产物可上传！" && exit 1
           echo "assets_dir=$(pwd)/release-assets" >> $GITHUB_OUTPUT
-          echo "最终整理的产物列表（绝对路径）:"
-          ls -la "$(pwd)/release-assets"
-          for file in "${ASSET_PATHS[@]}"; do
-            echo "确认产物存在: $file -> $(test -f "$file" && echo "是" || echo "否")"
-          done
+          ls -la ./release-assets
         shell: bash
 
-      - name: Upload Release Assets as Artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-assets-${{ matrix.os-name }}-${{ matrix.arch }}
@@ -196,31 +144,31 @@ jobs:
           if-no-files-found: error
 
   upload-all-assets-to-release:
-    needs: [generate-version, create-release, build]
+    needs: [generate-version, build]
     runs-on: ubuntu-latest
     steps:
-      - name: Download all platform artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./all-assets
           pattern: release-assets-*
           merge-multiple: true
 
-      - name: 检查下载的产物
+      - name: Check downloaded assets
         run: |
-          echo "所有下载的产物列表:"
+          set -e
           ls -la ./all-assets
-          if [ -z "$(ls -A ./all-assets 2>/dev/null)" ]; then
-            echo "错误: 未下载到任何产物！"
-            exit 1
-          fi
+          [ -z "$(ls -A ./all-assets 2>/dev/null)" ] && echo "错误: 无产物！" && exit 1
 
-      - name: Upload All Assets to Release
+      - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.generate-version.outputs.version }}
+          name: Auto Release ${{ needs.generate-version.outputs.version }}
+          draft: false
+          prerelease: false
           files: ./all-assets/*
           fail_on_unmatched_files: false
-          append_body: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        timeout-minutes: 10
