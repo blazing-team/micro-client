@@ -11,6 +11,7 @@ permissions:
 
 env:
   OUTPUT_DIR: ./out
+  APK_DIR: ./public/apk  # 新增：定义APK目录路径
 
 jobs:
   generate-version:
@@ -21,16 +22,10 @@ jobs:
       - name: Generate version number (Force Beijing Time)
         id: version
         run: |
-          # 核心修复：先export让当前shell立即生效时区，再写入环境变量
           export TZ=Asia/Shanghai
           echo "TZ=Asia/Shanghai" >> $GITHUB_ENV
-          
-          # 规范时间格式（年-月-日_时-分-秒），确保是北京时间
-          VERSION="v$(date +%Y-%m-%d_%H-%M)"
-          # 可选其他规范格式（选其一）：
-          # UTC时间带Z标识：VERSION="v$(date -u +%Y-%m-%dT%H-%M-%SZ)"
-          # 语义化点分隔：VERSION="v$(date +%Y.%m.%d-%H.%M.%S)"
-          
+          # 修改：时分用:连接，格式为 年-月-日_时:分，去除秒数
+          VERSION="v$(date +%Y-%m-%d_%H:%M)"
           echo "生成的北京时间版本号: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
         shell: bash
@@ -73,6 +68,13 @@ jobs:
             build-command: build-w
             electron-arch: "--x64"
             extensions: "exe,msi,zip"
+          # 新增：apk构建项（如果不需要单独构建，可注释，仅保留收集逻辑）
+          - os: ubuntu-latest
+            os-name: android
+            arch: arm64-v8a
+            build-command: echo "Skip build, only collect APK"
+            electron-arch: ""
+            extensions: "apk"
 
     steps:
       - name: Check out git repository
@@ -126,8 +128,16 @@ jobs:
             echo "输出目录下所有文件（含路径）:"
             find "$OUTPUT_DIR" -type f -print
           else
-            echo "错误: 输出目录 $OUTPUT_DIR 不存在!"
-            exit 1
+            echo "输出目录 $OUTPUT_DIR 不存在，跳过检查"
+          fi
+          # 新增：检查APK目录存在性
+          echo "检查APK目录存在性: $APK_DIR"
+          if [ -d "$APK_DIR" ]; then
+            echo "APK目录内容:"
+            ls -la "$APK_DIR"
+            find "$APK_DIR" -type f -name "*.apk" -print
+          else
+            echo "警告: APK目录 $APK_DIR 不存在!"
           fi
         shell: bash
 
@@ -143,8 +153,15 @@ jobs:
           ASSET_PATHS=()
           IFS=',' read -ra EXTS <<< "${{ matrix.extensions }}"
           for ext in "${EXTS[@]}"; do
-            echo "查找 $OUTPUT_DIR 下后缀为.$ext的文件..."
-            files=$(find "$OUTPUT_DIR" -type f -name "*.$ext" | sort | head -n 1)
+            echo "查找文件后缀为.$ext的文件..."
+            if [ "$ext" = "apk" ]; then
+              # 特殊处理APK：从public/apk目录查找
+              files=$(find "$APK_DIR" -type f -name "*.$ext" | sort | head -n 1)
+            else
+              # 其他产物：从OUTPUT_DIR查找
+              files=$(find "$OUTPUT_DIR" -type f -name "*.$ext" | sort | head -n 1)
+            fi
+
             if [ -n "$files" ]; then
               filename="${BASE_NAME}-$(basename "$files")"
               files=$(echo "$files" | sed 's/\\/\//g')
@@ -154,7 +171,7 @@ jobs:
               ASSET_PATHS+=("$ABS_FILE_PATH")
               echo "产物绝对路径: $ABS_FILE_PATH"
             else
-              echo "警告: 未找到 $OUTPUT_DIR 下后缀为.$ext的文件"
+              echo "警告: 未找到.$ext后缀的文件"
             fi
           done
           
@@ -167,11 +184,10 @@ jobs:
           echo "最终整理的产物列表（绝对路径）:"
           ls -la "$(pwd)/release-assets"
           for file in "${ASSET_PATHS[@]}"; do
-            echo "确认产物存在: $file -> $(test -f "$file" && "是" || "否")"
+            echo "确认产物存在: $file -> $(test -f "$file" && echo "是" || echo "否")"
           done
         shell: bash
 
-      # 仅上传产物到Artifact（不再直接上传到Release）
       - name: Upload Release Assets as Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -179,34 +195,31 @@ jobs:
           path: ./release-assets/*
           if-no-files-found: error
 
-  # 新增：统一上传所有平台的Artifact到Release（解决并发冲突）
   upload-all-assets-to-release:
-    needs: [generate-version, create-release, build]  # 等所有build完成
+    needs: [generate-version, create-release, build]
     runs-on: ubuntu-latest
     steps:
       - name: Download all platform artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ./all-assets  # 下载所有Artifact到all-assets目录
-          pattern: release-assets-*  # 匹配所有平台的Artifact名称
-          merge-multiple: true  # 合并所有Artifact到同一目录
+          path: ./all-assets
+          pattern: release-assets-*
+          merge-multiple: true
 
       - name: 检查下载的产物
         run: |
           echo "所有下载的产物列表:"
           ls -la ./all-assets
-          # 校验是否有产物
           if [ -z "$(ls -A ./all-assets 2>/dev/null)" ]; then
             echo "错误: 未下载到任何产物！"
             exit 1
           fi
 
-      # 统一上传所有产物到Release（串行执行，无并发冲突）
       - name: Upload All Assets to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.generate-version.outputs.version }}
-          files: ./all-assets/*  # 上传所有平台的产物
+          files: ./all-assets/*
           fail_on_unmatched_files: false
           append_body: true
         env:
