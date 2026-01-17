@@ -1,0 +1,273 @@
+name: Build and Auto-Release
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  OUTPUT_DIR: ./out
+  APK_DIR: ./public/apk  # APK 文件存放目录
+  IPA_DIR: ./public/ipa  # iOS IPA 文件存放目录（新增）
+
+jobs:
+  generate-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Generate version number (Beijing Time)
+        id: version
+        run: |
+          export TZ=Asia/Shanghai
+          echo "TZ=Asia/Shanghai" >> $GITHUB_ENV
+          # 时分用点连接，格式 v年-月-日_时.分
+          VERSION="v$(date +%Y-%m-%d_%H.%M)"
+          echo "生成的版本号: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        shell: bash
+
+  build:
+    needs: generate-version
+    name: Build for ${{ matrix.os-name }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 仅保留 Mac 和 Windows 构建
+          - os: macos-latest
+            os-name: mac
+            arch: x64
+            build-command: build-m
+            electron-arch: "--x64"
+            extensions: "dmg,app.zip"
+          - os: windows-latest
+            os-name: win
+            arch: x64
+            build-command: build-w
+            electron-arch: "--x64"
+            extensions: "exe,msi,zip"
+
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install Dependencies
+        run: |
+          set -e
+          NODE_OPTIONS=--max-old-space-size=4096 npm install --legacy-peer-deps
+          npm install ./ee-core
+          npm install bytenode@1.2.2
+        shell: bash
+
+      - name: Remove node prefixes in node_modules
+        run: |
+          set -e
+          if [ -f "./cmd/remove-node-prefix.js" ]; then
+            node --max-old-space-size=2048 ./cmd/remove-node-prefix.js ./node_modules
+          else
+            echo "错误：remove-node-prefix.js脚本不存在！"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Build Electron App
+        run: |
+          set -e
+          NODE_OPTIONS=--max-old-space-size=4096 npm run ${{ matrix.build-command }} ${{ matrix.electron-arch }}
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        shell: bash
+
+      - name: Check directory structure
+        run: |
+          set -e
+          echo "Current dir: $(pwd)"
+          ls -R
+          [ -d "$OUTPUT_DIR" ] && ls -la "$OUTPUT_DIR" && find "$OUTPUT_DIR" -type f -print
+        shell: bash
+
+      - name: Collect build assets
+        id: collect-assets
+        run: |
+          set -e
+          VERSION="${{ needs.generate-version.outputs.version }}"
+          BASE_NAME="${VERSION}-${{ matrix.os-name }}-${{ matrix.arch }}"
+          mkdir -p ./release-assets
+          rm -rf ./release-assets/*
+          
+          ASSET_PATHS=()
+          IFS=',' read -ra EXTS <<< "${{ matrix.extensions }}"
+          for ext in "${EXTS[@]}"; do
+            files=$(find "$OUTPUT_DIR" -type f -name "*.$ext" | sort | head -n 1)
+            if [ -n "$files" ]; then
+              filename="${BASE_NAME}-$(basename "$files")"
+              cp "$files" ./release-assets/"$filename"
+              ABS_FILE_PATH="$(pwd)/release-assets/$filename"
+              ASSET_PATHS+=("$ABS_FILE_PATH")
+            else
+              echo "警告: 未找到.$ext文件"
+            fi
+          done
+          
+          [ ${#ASSET_PATHS[@]} -eq 0 ] && echo "错误: 无产物可上传！" && exit 1
+          echo "assets_dir=$(pwd)/release-assets" >> $GITHUB_OUTPUT
+          ls -la ./release-assets
+        shell: bash
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.os-name }}-${{ matrix.arch }}
+          path: ./release-assets/*
+          if-no-files-found: error
+
+  # 单独的 APK 收集上传任务（无构建，仅复制文件）
+  collect-apk:
+    needs: generate-version
+    runs-on: ubuntu-latest
+    name: Collect APK (no build)
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check APK directory
+        run: |
+          set -e
+          echo "检查 APK 目录: $APK_DIR"
+          if [ ! -d "$APK_DIR" ]; then
+            echo "错误: APK 目录不存在！"
+            exit 1
+          fi
+          ls -la "$APK_DIR"
+          find "$APK_DIR" -type f -name "*.apk" -print
+        shell: bash
+
+      - name: Collect APK asset
+        id: collect-apk-assets
+        run: |
+          set -e
+          VERSION="${{ needs.generate-version.outputs.version }}"
+          BASE_NAME="${VERSION}-android-arm64-v8a"
+          mkdir -p ./release-assets
+          rm -rf ./release-assets/*
+          
+          # 查找第一个 APK 文件
+          apk_file=$(find "$APK_DIR" -type f -name "*.apk" | sort | head -n 1)
+          if [ -z "$apk_file" ]; then
+            echo "错误: 未找到 APK 文件！"
+            exit 1
+          fi
+          
+          filename="${BASE_NAME}-$(basename "$apk_file")"
+          cp "$apk_file" ./release-assets/"$filename"
+          echo "已整理 APK: ./release-assets/$filename"
+          echo "assets_dir=$(pwd)/release-assets" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-android-arm64-v8a
+          path: ./release-assets/*
+          if-no-files-found: error
+
+  # ========== 新增：收集 iOS IPA 文件任务 ==========
+  collect-ipa:
+    needs: generate-version
+    runs-on: ubuntu-latest
+    name: Collect IPA (no build)
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check IPA directory
+        run: |
+          set -e
+          echo "检查 IPA 目录: $IPA_DIR"
+          if [ ! -d "$IPA_DIR" ]; then
+            echo "错误: IPA 目录不存在！"
+            exit 1
+          fi
+          ls -la "$IPA_DIR"
+          find "$IPA_DIR" -type f -name "*.ipa" -print
+        shell: bash
+
+      - name: Collect IPA asset
+        id: collect-ipa-assets
+        run: |
+          set -e
+          VERSION="${{ needs.generate-version.outputs.version }}"
+          BASE_NAME="${VERSION}-ios-arm64"
+          mkdir -p ./release-assets
+          rm -rf ./release-assets/*
+          
+          # 查找第一个 IPA 文件
+          ipa_file=$(find "$IPA_DIR" -type f -name "*.ipa" | sort | head -n 1)
+          if [ -z "$ipa_file" ]; then
+            echo "错误: 未找到 IPA 文件！"
+            exit 1
+          fi
+          
+          filename="${BASE_NAME}-$(basename "$ipa_file")"
+          cp "$ipa_file" ./release-assets/"$filename"
+          echo "已整理 IPA: ./release-assets/$filename"
+          echo "assets_dir=$(pwd)/release-assets" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-ios-arm64
+          path: ./release-assets/*
+          if-no-files-found: error
+
+  # 统一上传所有产物到 Release（新增依赖 collect-ipa）
+  upload-all-assets-to-release:
+    needs: [generate-version, build, collect-apk, collect-ipa]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./all-assets
+          pattern: release-assets-*
+          merge-multiple: true
+
+      - name: Check downloaded assets
+        run: |
+          set -e
+          ls -la ./all-assets
+          if [ -z "$(ls -A ./all-assets 2>/dev/null)" ]; then
+            echo "错误: 无产物可上传！"
+            exit 1
+          fi
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.generate-version.outputs.version }}
+          name: Auto Release ${{ needs.generate-version.outputs.version }}
+          draft: false
+          prerelease: false
+          files: ./all-assets/*
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        timeout-minutes: 10
