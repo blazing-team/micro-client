@@ -12,6 +12,7 @@ permissions:
 env:
   OUTPUT_DIR: ./out
   APK_DIR: ./public/apk  # APK 文件存放目录
+  IPA_DIR: ./public/ipa  # iOS IPA 文件存放目录（新增）
 
 jobs:
   generate-version:
@@ -185,9 +186,61 @@ jobs:
           path: ./release-assets/*
           if-no-files-found: error
 
-  # 统一上传所有产物到 Release
+  # ========== 新增：收集 iOS IPA 文件任务 ==========
+  collect-ipa:
+    needs: generate-version
+    runs-on: ubuntu-latest
+    name: Collect IPA (no build)
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check IPA directory
+        run: |
+          set -e
+          echo "检查 IPA 目录: $IPA_DIR"
+          if [ ! -d "$IPA_DIR" ]; then
+            echo "错误: IPA 目录不存在！"
+            exit 1
+          fi
+          ls -la "$IPA_DIR"
+          find "$IPA_DIR" -type f -name "*.ipa" -print
+        shell: bash
+
+      - name: Collect IPA asset
+        id: collect-ipa-assets
+        run: |
+          set -e
+          VERSION="${{ needs.generate-version.outputs.version }}"
+          BASE_NAME="${VERSION}-ios-arm64"
+          mkdir -p ./release-assets
+          rm -rf ./release-assets/*
+          
+          # 查找第一个 IPA 文件
+          ipa_file=$(find "$IPA_DIR" -type f -name "*.ipa" | sort | head -n 1)
+          if [ -z "$ipa_file" ]; then
+            echo "错误: 未找到 IPA 文件！"
+            exit 1
+          fi
+          
+          filename="${BASE_NAME}-$(basename "$ipa_file")"
+          cp "$ipa_file" ./release-assets/"$filename"
+          echo "已整理 IPA: ./release-assets/$filename"
+          echo "assets_dir=$(pwd)/release-assets" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-ios-arm64
+          path: ./release-assets/*
+          if-no-files-found: error
+
+  # 统一上传所有产物到 Release（新增依赖 collect-ipa）
   upload-all-assets-to-release:
-    needs: [generate-version, build, collect-apk]
+    needs: [generate-version, build, collect-apk, collect-ipa]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
