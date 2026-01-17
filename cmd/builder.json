@@ -1,0 +1,56 @@
+{
+  "productName": "sun",
+  "appId": "com.blazing-client.app",
+  "copyright": "© 2025 TO Technology Co., Ltd.",
+  "directories": {
+    "output": "out"
+  },
+  "asar": true,
+  "files": [
+    "node_modules/**/*",
+ "public/electron/**/*",
+ "public/dist/**/*",
+  "public/html/**/*",
+    "public/images/**/*"
+    
+  ],
+  "extraResources": {
+    "from": "build/extraResources/plugins/win_x64/",
+    "to": "extraResources/plugins/win_x64/"
+  }, 
+  "nsis": {
+   
+    "oneClick": false,
+    "allowElevation": true,
+     
+    "allowToChangeInstallationDirectory": true,
+    
+    "installerIcon": "build/icons/icon.ico",
+    
+    "uninstallerIcon": "build/icons/icon.ico",
+    
+    "installerHeaderIcon": "build/icons/icon.ico",
+    
+    "createDesktopShortcut": true,
+   
+    "createStartMenuShortcut": true,
+   
+    "shortcutName": "sun"
+  },
+  "publish": [
+    {
+      "provider": "generic",
+      "url": ""
+    }
+  ],
+  "win": {
+     
+    "icon": "build/icons/icon.ico",
+    "artifactName": "${productName}-${os}-${version}-${arch}.${ext}",
+    "target": [
+      {
+        "target": "nsis"
+      }
+    ]
+  }
+}

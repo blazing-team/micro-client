@@ -1,0 +1,1 @@
+import{E as s,c as t,g as e}from"./@tiptap.core-HsqG-hEX.js";import{g as n}from"./prosemirror-gapcursor-CCa3-K6O.js";const p=s.create({name:"gapCursor",addProseMirrorPlugins(){return[n()]},extendNodeSchema(r){var o;const a={name:r.name,options:r.options,storage:r.storage};return{allowGapCursor:(o=t(e(r,"allowGapCursor",a)))!==null&&o!==void 0?o:null}}});export{p as G};
